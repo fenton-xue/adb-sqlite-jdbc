@@ -83,6 +83,8 @@ jdbc:adb:sqlite://<设备地址>?package=<包名>&db=<数据库路径>
 | **db** | 数据库路径 | 见下方说明 |
 | **root** | 可选，默认 `true`；当 `adb shell sqlite3 <db>` 能看到表而 `su -c sqlite3 <db>` 看不到表时设为 `false` | `false` |
 
+> `root=false` 的原因：部分设备上普通 `adb shell sqlite3` 和 `su -c sqlite3` 访问到的数据库视图不一致，会出现不加 su 能看到表、加 su 反而看不到表的情况。
+
 **数据库路径说明**：
 
 - **相对路径**：相对于 `/data/data/{包名}/` 目录。绝大多数 App 的数据库都存放在 `databases/` 下，比如 `databases/main.db`，实际对应的是 `/data/data/com.baimeihome.pre/databases/main.db`
