@@ -30,6 +30,11 @@ public class AdbSqlitePreparedStatement extends AdbSqliteStatement implements Pr
     }
 
     @Override
+    public long executeLargeUpdate() throws SQLException {
+        return super.executeLargeUpdate(buildSql());
+    }
+
+    @Override
     public boolean execute() throws SQLException {
         return super.execute(buildSql());
     }
@@ -40,21 +45,7 @@ public class AdbSqlitePreparedStatement extends AdbSqliteStatement implements Pr
     }
 
     private String buildSql() {
-        String result = sql;
-        for (int i = 0; i < params.size(); i++) {
-            Object p = params.get(i);
-            String replacement;
-            if (p == null) {
-                replacement = "NULL";
-            } else if (p instanceof Number) {
-                replacement = p.toString();
-            } else {
-                String escaped = p.toString().replace("'", "''");
-                replacement = "'" + escaped + "'";
-            }
-            result = result.replaceFirst("\\?", replacement);
-        }
-        return result;
+        return bindParams(sql, params);
     }
 
     // ---- parameter setters ----

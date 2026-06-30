@@ -27,7 +27,7 @@ public class AdbSqliteDriver implements Driver {
         } else {
             dbPath = "/data/data/" + ui.packageName + "/" + ui.db; // 相对路径拼接
         }
-        return new AdbSqliteConnection(url, ui.device, dbPath);
+        return new AdbSqliteConnection(url, ui.device, dbPath, ui.root);
     }
 
     @Override
@@ -44,7 +44,7 @@ public class AdbSqliteDriver implements Driver {
     public int getMajorVersion() { return 1; }
 
     @Override
-    public int getMinorVersion() { return 0; }
+    public int getMinorVersion() { return 2; }
 
     @Override
     public boolean jdbcCompliant() { return false; }
@@ -60,10 +60,11 @@ public class AdbSqliteDriver implements Driver {
         String device;
         String packageName;
         String db;
+        boolean root = true;
     }
 
     /**
-     * 解析 JDBC URL: jdbc:adb:sqlite://host:port?package=xxx&db=xxx.db
+     * 解析 JDBC URL: jdbc:adb:sqlite://host:port?package=xxx&db=xxx.db&root=false
      */
     static UrlInfo parseUrl(String url) throws SQLException {
         String body = url.substring(URL_PREFIX.length());
@@ -96,6 +97,7 @@ public class AdbSqliteDriver implements Driver {
             if ("package".equals(key)) info.packageName = val;
             else if ("db".equals(key)) info.db = val;
             else if ("device".equals(key)) info.device = val;
+            else if ("root".equals(key) || "useRoot".equals(key)) info.root = parseBooleanParameter(key, val);
         }
 
         if (info.device == null || info.device.isEmpty())
@@ -106,5 +108,15 @@ public class AdbSqliteDriver implements Driver {
             throw new SQLException("URL 中缺少 db 参数");
 
         return info;
+    }
+
+    private static boolean parseBooleanParameter(String key, String val) throws SQLException {
+        if ("true".equalsIgnoreCase(val) || "1".equals(val) || "yes".equalsIgnoreCase(val)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(val) || "0".equals(val) || "no".equalsIgnoreCase(val)) {
+            return false;
+        }
+        throw new SQLException("无效的 URL 参数 " + key + "=" + val + "，仅支持 true/false");
     }
 }

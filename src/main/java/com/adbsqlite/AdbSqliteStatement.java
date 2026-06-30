@@ -1,6 +1,8 @@
 package com.adbsqlite;
 
 import java.io.BufferedReader;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
@@ -8,19 +10,21 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLWarning;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 public class AdbSqliteStatement implements Statement {
 
-    private static final String NULL_MARKER = "__ADB_NULL__";
+    static final String NULL_MARKER = "__ADB_NULL__";
+    private static final String UPDATE_COUNT_COLUMN = "__adb_update_count__";
     private static final int TIMEOUT_SEC = 30;
 
     private final AdbSqliteConnection conn;
     private boolean closed;
+    private int updateCount = -1;
     private final List<Object> params = new ArrayList<>();
 
     AdbSqliteStatement(AdbSqliteConnection conn) {
@@ -48,25 +52,101 @@ public class AdbSqliteStatement implements Statement {
     @Override
     public ResultSet executeQuery(String sql) throws SQLException {
         ensureOpen();
+        updateCount = -1;
         String finalSql = replaceParams(sql);
         List<String> lines = exec(finalSql);
-        // 解析 CSV: 第一行列名，后续为数据
         if (lines.isEmpty()) return emptyResultSet();
-        List<String> columns = parseCsvLine(lines.get(0));
+        List<List<String>> records = parseCsvRecords(String.join("\n", lines));
+        if (records.isEmpty()) return emptyResultSet();
+        // 解析 CSV: 第一条记录是列名，后续为数据
+        List<String> columns = records.get(0);
         List<String[]> rows = new ArrayList<>();
-        for (int i = 1; i < lines.size(); i++) {
-            String[] row = parseCsvLine(lines.get(i)).toArray(new String[0]);
+        for (int i = 1; i < records.size(); i++) {
+            List<String> fields = records.get(i);
+            if (fields.size() > columns.size()) {
+                throw new SQLException("CSV record has " + fields.size()
+                        + " fields, expected " + columns.size() + " at record " + (i + 1));
+            }
+            String[] row = new String[columns.size()];
+            for (int j = 0; j < columns.size(); j++) {
+                row[j] = j < fields.size() ? fields.get(j) : NULL_MARKER;
+            }
             rows.add(row);
         }
-        return new AdbSqliteResultSet(columns, rows, NULL_MARKER);
+        // 尝试解析列类型（仅对 SELECT FROM 单表查询有效）
+        List<Integer> columnTypes = resolveColumnTypes(finalSql, columns);
+        return new AdbSqliteResultSet(columns, rows, NULL_MARKER, columnTypes);
+    }
+
+    private List<Integer> resolveColumnTypes(String sql, List<String> columns) {
+        String tableName = extractTableName(sql);
+        if (tableName == null) return null;
+        try {
+            String safeName = tableName.replace("'", "''");
+            List<String> pragmaLines = exec("PRAGMA table_info('" + safeName + "')");
+            if (pragmaLines.isEmpty()) return null;
+            List<String> ph = parseCsvLine(pragmaLines.get(0));
+            int colNameIdx = ph.indexOf("name");
+            int typeIdx = ph.indexOf("type");
+            Integer[] types = new Integer[columns.size()];
+            for (int i = 1; i < pragmaLines.size(); i++) {
+                List<String> pf = parseCsvLine(pragmaLines.get(i));
+                String colName = pf.get(colNameIdx);
+                String sqliteType = pf.get(typeIdx);
+                int jdbcType = AdbSqliteDatabaseMetaData.sqliteTypeToJdbcType(sqliteType);
+                for (int j = 0; j < columns.size(); j++) {
+                    if (columns.get(j).equalsIgnoreCase(colName)) {
+                        types[j] = jdbcType;
+                    }
+                }
+            }
+            for (int i = 0; i < types.length; i++) {
+                if (types[i] == null) types[i] = Types.VARCHAR;
+            }
+            return java.util.Arrays.asList(types);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String extractTableName(String sql) {
+        String upper = sql.toUpperCase().trim();
+        int fromIdx = upper.indexOf("FROM ");
+        if (fromIdx < 0) return null;
+        String after = sql.substring(fromIdx + 5).trim();
+        if (after.isEmpty()) return null;
+        // 跳过可能的括号、引号
+        char first = after.charAt(0);
+        if (first == '(') return null; // 子查询，不支持
+        int end = 0;
+        for (int i = 0; i < after.length(); i++) {
+            char c = after.charAt(i);
+            if (Character.isWhitespace(c) || c == ',' || c == ';' || c == ')'
+                    || c == 'W' /* WHERE */ || c == 'G' /* GROUP */ || c == 'O' /* ORDER */
+                    || c == 'L' /* LIMIT */ || c == 'J' /* JOIN */ || c == 'I' /* INNER */ || c == 'L' /* LEFT */) {
+                end = i;
+                break;
+            }
+            end = i + 1;
+        }
+        String tableName = after.substring(0, end);
+        // 去除可能的引号
+        if ((tableName.startsWith("\"") && tableName.endsWith("\""))
+                || (tableName.startsWith("`") && tableName.endsWith("`"))
+                || (tableName.startsWith("'") && tableName.endsWith("'"))) {
+            tableName = tableName.substring(1, tableName.length() - 1);
+        }
+        if (tableName.isEmpty()) return null;
+        return tableName;
     }
 
     @Override
     public int executeUpdate(String sql) throws SQLException {
         ensureOpen();
         String finalSql = replaceParams(sql);
-        exec(finalSql);
-        return 0; // sqlite3 不返回影响行数
+        List<String> lines = exec(appendChangesQuery(finalSql));
+        updateCount = parseUpdateCount(lines);
+        return updateCount;
     }
 
     @Override
@@ -91,7 +171,30 @@ public class AdbSqliteStatement implements Statement {
     }
 
     @Override
-    public int getUpdateCount() { return -1; }
+    public int getUpdateCount() { return updateCount; }
+
+    @Override
+    public long getLargeUpdateCount() { return updateCount; }
+
+    @Override
+    public long executeLargeUpdate(String sql) throws SQLException {
+        return executeUpdate(sql);
+    }
+
+    @Override
+    public long executeLargeUpdate(String sql, int autoGeneratedKeys) throws SQLException {
+        return executeLargeUpdate(sql);
+    }
+
+    @Override
+    public long executeLargeUpdate(String sql, int[] columnIndexes) throws SQLException {
+        return executeLargeUpdate(sql);
+    }
+
+    @Override
+    public long executeLargeUpdate(String sql, String[] columnNames) throws SQLException {
+        return executeLargeUpdate(sql);
+    }
 
     @Override
     public boolean getMoreResults() { return false; }
@@ -122,34 +225,54 @@ public class AdbSqliteStatement implements Statement {
 
     @Override
     public int[] executeBatch() throws SQLException {
+        ensureOpen();
         int[] results = new int[batch.size()];
         for (int i = 0; i < batch.size(); i++) {
-            execute(batch.get(i));
-            results[i] = SUCCESS_NO_INFO;
+            results[i] = executeUpdate(batch.get(i));
         }
         batch.clear();
         return results;
     }
 
-    // ---- 核心: ADB 命令执行（用 base64 编码传递 SQL，全平台兼容）----
-    //     base64 仅含字母数字和 +/=，无任何 shell 特殊字符
+    @Override
+    public long[] executeLargeBatch() throws SQLException {
+        ensureOpen();
+        long[] results = new long[batch.size()];
+        for (int i = 0; i < batch.size(); i++) {
+            results[i] = executeLargeUpdate(batch.get(i));
+        }
+        batch.clear();
+        return results;
+    }
 
-    private List<String> exec(String sql) throws SQLException {
-        String b64 = Base64.getEncoder().encodeToString(sql.getBytes(StandardCharsets.UTF_8));
-        String cmd = String.format(
-                "su -c 'echo \"%s\" | base64 -d | sqlite3 -header -csv -nullvalue %s %s 2>&1'",
-                b64, NULL_MARKER, conn.getDbPath());
+    // ---- 核心: ADB 命令执行 ----
+
+    List<String> exec(String sql) throws SQLException {
+        String sqliteCmd = String.format(
+                "sqlite3 -header -csv -nullvalue %s %s 2>&1",
+                NULL_MARKER, conn.getDbPath());
+        String cmd = conn.isRoot() ? "su -c '" + sqliteCmd + "'" : sqliteCmd;
         System.out.println("[ADB] " + cmd);
         System.out.println("[SQL] " + sql);
-        return runAdb(conn.getDevice(), cmd);
+        return runAdb(conn.getDevice(), cmd, sql);
     }
 
     List<String> runAdb(String device, String shellCmd) throws SQLException {
+        return runAdb(device, shellCmd, null);
+    }
+
+    List<String> runAdb(String device, String shellCmd, String stdin) throws SQLException {
         List<String> result = new ArrayList<>();
         try {
             ProcessBuilder pb = new ProcessBuilder("adb", "-s", device, "shell", shellCmd);
             pb.redirectErrorStream(true);
             Process p = pb.start();
+
+            if (stdin != null) {
+                try (Writer writer = new OutputStreamWriter(p.getOutputStream(), StandardCharsets.UTF_8)) {
+                    writer.write(stdin);
+                }
+            }
 
             // 读取输出
             try (BufferedReader reader = new BufferedReader(
@@ -166,9 +289,14 @@ public class AdbSqliteStatement implements Statement {
                 throw new SQLException("ADB 命令超时（" + TIMEOUT_SEC + "秒）");
             }
 
+            int exitCode = p.exitValue();
             // 检查 sqlite3 错误
             if (!result.isEmpty() && result.get(0).startsWith("Error:")) {
                 throw new SQLException("SQLite 错误: " + String.join("\n", result));
+            }
+            if (exitCode != 0) {
+                String output = result.isEmpty() ? "" : ": " + String.join("\n", result);
+                throw new SQLException("ADB/SQLite 命令失败（exit " + exitCode + "）" + output);
             }
             return result;
         } catch (SQLException e) {
@@ -213,24 +341,176 @@ public class AdbSqliteStatement implements Statement {
         return fields;
     }
 
+    static List<List<String>> parseCsvRecords(String csv) throws SQLException {
+        List<List<String>> records = new ArrayList<>();
+        if (csv == null || csv.isEmpty()) return records;
+
+        List<String> record = new ArrayList<>();
+        StringBuilder field = new StringBuilder();
+        boolean inquote = false;
+        boolean recordHasContent = false;
+
+        for (int i = 0; i < csv.length(); i++) {
+            char c = csv.charAt(i);
+            if (inquote) {
+                if (c == '"') {
+                    if (i + 1 < csv.length() && csv.charAt(i + 1) == '"') {
+                        field.append('"');
+                        i++;
+                    } else {
+                        inquote = false;
+                    }
+                } else {
+                    field.append(c);
+                }
+            } else {
+                if (c == '"') {
+                    inquote = true;
+                    recordHasContent = true;
+                } else if (c == ',') {
+                    record.add(field.toString());
+                    field.setLength(0);
+                    recordHasContent = true;
+                } else if (c == '\n' || c == '\r') {
+                    if (c == '\r' && i + 1 < csv.length() && csv.charAt(i + 1) == '\n') {
+                        i++;
+                    }
+                    record.add(field.toString());
+                    field.setLength(0);
+                    records.add(record);
+                    record = new ArrayList<>();
+                    recordHasContent = false;
+                } else {
+                    field.append(c);
+                    recordHasContent = true;
+                }
+            }
+        }
+
+        if (inquote) {
+            throw new SQLException("Unterminated quoted CSV field");
+        }
+        if (recordHasContent || field.length() > 0 || !record.isEmpty()) {
+            record.add(field.toString());
+            records.add(record);
+        }
+        return records;
+    }
+
+    private static String appendChangesQuery(String sql) {
+        String trimmed = sql.trim();
+        if (trimmed.endsWith(";")) {
+            return trimmed + "\nSELECT changes() AS " + UPDATE_COUNT_COLUMN;
+        }
+        return trimmed + ";\nSELECT changes() AS " + UPDATE_COUNT_COLUMN;
+    }
+
+    static int parseUpdateCount(List<String> lines) throws SQLException {
+        if (lines == null || lines.isEmpty()) return 0;
+        throwIfSqliteError(lines);
+
+        List<List<String>> records = parseCsvRecords(String.join("\n", lines));
+        for (int i = 0; i < records.size() - 1; i++) {
+            List<String> header = records.get(i);
+            for (int j = 0; j < header.size(); j++) {
+                if (UPDATE_COUNT_COLUMN.equalsIgnoreCase(header.get(j))) {
+                    List<String> values = records.get(i + 1);
+                    if (j >= values.size()) {
+                        throw new SQLException("Missing SQLite update count value");
+                    }
+                    try {
+                        return Integer.parseInt(values.get(j));
+                    } catch (NumberFormatException e) {
+                        throw new SQLException("Invalid SQLite update count: " + values.get(j), e);
+                    }
+                }
+            }
+        }
+
+        List<String> lastRecord = records.get(records.size() - 1);
+        if (lastRecord.size() == 1) {
+            try {
+                return Integer.parseInt(lastRecord.get(0));
+            } catch (NumberFormatException ignored) {
+                // Fall through to a descriptive error below.
+            }
+        }
+        throw new SQLException("Unable to determine SQLite update count: " + String.join("\n", lines));
+    }
+
+    private static void throwIfSqliteError(List<String> lines) throws SQLException {
+        for (String line : lines) {
+            if (line == null) continue;
+            String trimmed = line.trim();
+            if (trimmed.startsWith("Error:") || trimmed.startsWith("Runtime error")) {
+                throw new SQLException("SQLite 错误: " + String.join("\n", lines));
+            }
+        }
+    }
+
     // ---- 参数替换 ----
 
     private String replaceParams(String sql) {
         if (params.isEmpty()) return sql;
-        String result = sql;
-        for (int i = 0; i < params.size(); i++) {
-            Object p = params.get(i);
-            if (p == null) {
-                result = result.replaceFirst("\\?", "NULL");
-            } else if (p instanceof Number) {
-                result = result.replaceFirst("\\?", p.toString());
+        return bindParams(sql, params);
+    }
+
+    static String bindParams(String sql, List<Object> params) {
+        StringBuilder result = new StringBuilder(sql.length() + params.size() * 8);
+        boolean inSingleQuote = false;
+        boolean inDoubleQuote = false;
+        int paramIndex = 0;
+
+        for (int i = 0; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+
+            if (inSingleQuote) {
+                result.append(c);
+                if (c == '\'') {
+                    if (i + 1 < sql.length() && sql.charAt(i + 1) == '\'') {
+                        result.append(sql.charAt(i + 1));
+                        i++;
+                    } else {
+                        inSingleQuote = false;
+                    }
+                }
+                continue;
+            }
+
+            if (inDoubleQuote) {
+                result.append(c);
+                if (c == '"') {
+                    if (i + 1 < sql.length() && sql.charAt(i + 1) == '"') {
+                        result.append(sql.charAt(i + 1));
+                        i++;
+                    } else {
+                        inDoubleQuote = false;
+                    }
+                }
+                continue;
+            }
+
+            if (c == '\'') {
+                inSingleQuote = true;
+                result.append(c);
+            } else if (c == '"') {
+                inDoubleQuote = true;
+                result.append(c);
+            } else if (c == '?' && paramIndex < params.size()) {
+                result.append(toSqlLiteral(params.get(paramIndex++)));
             } else {
-                // 字符串: 用单引号包裹，转义内部单引号
-                String escaped = p.toString().replace("'", "''");
-                result = result.replaceFirst("\\?", "'" + escaped + "'");
+                result.append(c);
             }
         }
-        return result;
+
+        return result.toString();
+    }
+
+    static String toSqlLiteral(Object value) {
+        if (value == null) return "NULL";
+        if (value instanceof Number) return value.toString();
+        String escaped = value.toString().replace("'", "''");
+        return "'" + escaped + "'";
     }
 
     private ResultSet emptyResultSet() throws SQLException {

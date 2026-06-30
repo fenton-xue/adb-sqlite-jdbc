@@ -10,16 +10,18 @@ public class AdbSqliteConnection implements Connection {
     private final String device;
     private final String dbPath;
     private final String url;
+    private final boolean root;
     private boolean closed;
     private ResultSet lastResultSet;
     private final DatabaseMetaData metaData;
 
-    AdbSqliteConnection(String url, String device, String dbPath) throws SQLException {
+    AdbSqliteConnection(String url, String device, String dbPath, boolean root) throws SQLException {
         this.url = url;
         this.device = device;
         this.dbPath = dbPath;
+        this.root = root;
         this.metaData = new AdbSqliteDatabaseMetaData(this);
-        // 连接时校验 ADB 和 Root
+        // 连接时校验 ADB，以及默认 root 模式下的 su 权限。
         validateConnection();
     }
 
@@ -27,12 +29,11 @@ public class AdbSqliteConnection implements Connection {
         // 用 AdbSqliteStatement.runAdb 静态方法执行验证
         AdbSqliteStatement s = new AdbSqliteStatement(this);
         try {
-            // 校验 root
-            s.runAdb(device, "su -c 'echo ROOT_OK'");
+            s.runAdb(device, root ? "su -c 'echo ROOT_OK'" : "echo OK");
         } catch (SQLException e) {
-            throw new SQLException("ADB 连接或 Root 权限检查失败，请确认: \n"
+            throw new SQLException("ADB 连接或权限检查失败，请确认: \n"
                     + "  1. adb devices 能看到设备\n"
-                    + "  2. 设备已 Root\n"
+                    + "  2. 默认 root=true 时设备已 Root；如需非 su 模式请在 URL 增加 root=false\n"
                     + "  3. 目标设备地址: " + device, e);
         }
     }
@@ -54,7 +55,7 @@ public class AdbSqliteConnection implements Connection {
         if (closed) return false;
         try {
             AdbSqliteStatement s = new AdbSqliteStatement(this);
-            s.runAdb(device, "su -c 'echo OK'");
+            s.runAdb(device, root ? "su -c 'echo OK'" : "echo OK");
             return true;
         } catch (Exception e) {
             return false;
@@ -213,6 +214,7 @@ public class AdbSqliteConnection implements Connection {
 
     String getDevice() { return device; }
     String getDbPath() { return dbPath; }
+    boolean isRoot() { return root; }
 
     void setLastResultSet(ResultSet rs) { this.lastResultSet = rs; }
     ResultSet getLastResultSet() { return lastResultSet; }

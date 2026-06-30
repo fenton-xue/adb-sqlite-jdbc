@@ -20,10 +20,14 @@ public class AdbSqliteResultSet implements ResultSet {
     private final ResultSetMetaData metaData;
 
     public AdbSqliteResultSet(List<String> columns, List<String[]> rows, String nullMarker) {
+        this(columns, rows, nullMarker, null);
+    }
+
+    public AdbSqliteResultSet(List<String> columns, List<String[]> rows, String nullMarker, List<Integer> columnTypes) {
         this.columns = columns;
         this.rows = rows;
         this.nullMarker = nullMarker;
-        this.metaData = new AdbSqliteResultSetMetaData(columns);
+        this.metaData = new AdbSqliteResultSetMetaData(columns, columnTypes);
     }
 
     @Override

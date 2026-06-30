@@ -5,12 +5,36 @@ import java.sql.SQLException;
 import java.sql.Types;
 import java.util.List;
 
+import java.util.HashMap;
+import java.util.Map;
+
 class AdbSqliteResultSetMetaData implements ResultSetMetaData {
 
     private final List<String> columns;
+    private final List<Integer> columnTypes;
+
+    private static final Map<Integer, String> TYPE_NAMES = new HashMap<>();
+    static {
+        TYPE_NAMES.put(Types.INTEGER, "INTEGER");
+        TYPE_NAMES.put(Types.DOUBLE, "REAL");
+        TYPE_NAMES.put(Types.VARCHAR, "TEXT");
+        TYPE_NAMES.put(Types.BLOB, "BLOB");
+    }
 
     AdbSqliteResultSetMetaData(List<String> columns) {
+        this(columns, null);
+    }
+
+    AdbSqliteResultSetMetaData(List<String> columns, List<Integer> columnTypes) {
         this.columns = columns;
+        this.columnTypes = columnTypes;
+    }
+
+    private int getColType(int column) throws SQLException {
+        if (columnTypes != null && column - 1 < columnTypes.size()) {
+            return columnTypes.get(column - 1);
+        }
+        return Types.VARCHAR;
     }
 
     @Override
@@ -29,13 +53,14 @@ class AdbSqliteResultSetMetaData implements ResultSetMetaData {
     @Override
     public String getColumnTypeName(int column) throws SQLException {
         check(column);
-        return "TEXT";
+        String name = TYPE_NAMES.get(getColType(column));
+        return name != null ? name : "TEXT";
     }
 
     @Override
     public int getColumnType(int column) throws SQLException {
         check(column);
-        return Types.VARCHAR;
+        return getColType(column);
     }
 
     @Override
@@ -64,7 +89,9 @@ class AdbSqliteResultSetMetaData implements ResultSetMetaData {
 
     @Override
     public int getPrecision(int column) throws SQLException {
-        check(column);
+        int type = getColType(check(column));
+        if (type == Types.INTEGER) return 10;
+        if (type == Types.DOUBLE) return 15;
         return 0;
     }
 
@@ -118,8 +145,8 @@ class AdbSqliteResultSetMetaData implements ResultSetMetaData {
 
     @Override
     public boolean isSigned(int column) throws SQLException {
-        check(column);
-        return false;
+        int type = getColType(check(column));
+        return type == Types.INTEGER || type == Types.DOUBLE;
     }
 
     @Override
@@ -130,8 +157,13 @@ class AdbSqliteResultSetMetaData implements ResultSetMetaData {
 
     @Override
     public String getColumnClassName(int column) throws SQLException {
-        check(column);
-        return "java.lang.String";
+        int type = getColType(check(column));
+        switch (type) {
+            case Types.INTEGER: return "java.lang.Long";
+            case Types.DOUBLE: return "java.lang.Double";
+            case Types.BLOB: return "[B";
+            default: return "java.lang.String";
+        }
     }
 
     @Override

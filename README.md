@@ -1,6 +1,6 @@
 # ADB SQLite JDBC Driver
 
-通过 ADB + Root + sqlite3 命令操作 Android 设备上 SQLite 数据库的 JDBC Driver。
+通过 ADB + sqlite3 命令操作 Android 设备上 SQLite 数据库的 JDBC Driver，默认使用 Root，可通过 URL 参数切换为非 su 模式。
 
 **适用场景**：在 IntelliJ IDEA Database 工具中直接连接 MuMu 模拟器（或其他 Android 设备）上非 debuggable App 的 SQLite 数据库。
 
@@ -10,24 +10,24 @@ GitHub：https://github.com/fenton-xue/adb-sqlite-jdbc
 
 - JDK 8+
 - ADB 已安装并配置在 PATH 中
-- 目标设备已 Root
+- 默认模式要求目标设备已 Root；非 su 模式要求 `adb shell sqlite3 <dbPath>` 可直接访问数据库
 - 目标设备已通过 ADB 连接（`adb devices` 可见）
 
 ## 获取 JAR
 
-下载 `adb-sqlite-jdbc-1.0.1.jar`（项目根目录），或自行构建：
+使用 `target/adb-sqlite-jdbc-1.0.10.jar`，或自行构建：
 
 ```bash
 git clone https://github.com/fenton-xue/adb-sqlite-jdbc.git
 cd adb-sqlite-jdbc
 mvn clean package -DskipTests
-# JAR 在 target/adb-sqlite-jdbc-1.0.1.jar
+# JAR 在 target/adb-sqlite-jdbc-1.0.10.jar
 ```
 
 ## JDBC URL 格式
 
 ```
-jdbc:adb:sqlite://<host:port>?package=<包名>&db=<数据库路径>[&device=<设备地址>]
+jdbc:adb:sqlite://<host:port>?package=<包名>&db=<数据库路径>[&device=<设备地址>][&root=false]
 ```
 
 ### 参数说明
@@ -38,6 +38,7 @@ jdbc:adb:sqlite://<host:port>?package=<包名>&db=<数据库路径>[&device=<设
 | package | 是 | App 包名 | `com.baimeihome.pre` |
 | db | 是 | 数据库路径。相对路径相对于 `/data/data/{package}/`，绝对路径以 `/` 开头 | `databases/main.db` 或 `/sdcard/.../demo.db` |
 | device | 否 | 覆盖 ADB 设备地址，优先级高于 host:port | `192.168.1.100:5555` |
+| root | 否 | 是否通过 `su -c` 执行 sqlite3，默认 `true`。当 `adb shell sqlite3 <dbPath>` 可直接看到表而 `su -c sqlite3 <dbPath>` 看不到表时，设置为 `false` | `false` |
 
 ### 完整示例
 
@@ -58,6 +59,11 @@ jdbc:adb:sqlite://127.0.0.1:7555?package=com.baimeihome.pre&db=/sdcard/Android/d
 jdbc:adb:sqlite://?package=com.giga.qc&db=databases/main.db&device=127.0.0.1:7555
 ```
 
+非 su 模式：
+```
+jdbc:adb:sqlite://127.0.0.1:16384?package=com.giga.qc&db=databases/qcapp_localSQLite.db&root=false
+```
+
 ## 在 IntelliJ IDEA 中使用
 
 ### 1. 添加 Driver
@@ -66,7 +72,7 @@ jdbc:adb:sqlite://?package=com.giga.qc&db=databases/main.db&device=127.0.0.1:755
 2. 点击 **+** → **Driver**
 3. 填写：
    - **Name**: `ADB SQLite`
-   - **Driver Files**: 选择 `adb-sqlite-jdbc-1.0.1.jar`
+   - **Driver Files**: 选择 `adb-sqlite-jdbc-1.0.10.jar`
    - **Class**: `com.adbsqlite.AdbSqliteDriver`
    - **URL template**: `jdbc:adb:sqlite://{host:port}?package={package}&db={db}`
 4. 点击 **OK**
@@ -108,13 +114,13 @@ jdbc:adb:sqlite://?package=com.giga.qc&db=databases/main.db&device=127.0.0.1:755
 ```
 Java JDBC 调用
   → adb -s <device> shell
-    → su -c
-      → echo "base64(SQL)" | base64 -d | sqlite3 -header -csv <dbPath>
+    → 默认: su -c 'sqlite3 -header -csv <dbPath>'
+      或: sqlite3 -header -csv <dbPath>  (root=false)
         → 解析 CSV 输出
           → ResultSet
 ```
 
-SQL 通过 base64 编码传递给设备端，避免 shell 引号和特殊字符转义问题。
+SQL 通过 stdin 传递给设备端 sqlite3，避免长 SQL 触发 shell 命令长度限制。
 
 ## License
 
